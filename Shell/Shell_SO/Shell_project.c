@@ -23,6 +23,65 @@ To compile and run the program:
 //                            MAIN          
 // -----------------------------------------------------------------------
 
+//La lista es una estructura global
+job *lista;
+
+void my_sigchld(int x){
+	
+	/*
+	MANEJADOR DE SIGCHLD ->
+	recorrer todos los jobs en bg y suspendidos a ver
+	qué les ha pasado
+	SI MUERTOS -> quitar de la lista
+	SI CAMBIAN DE ESTADO -> cambiar el job correspondiente
+	*/
+
+	int i, status, info, pid_wait;
+	enum status status_res; //status processed by anlyze_status()
+	job* jb;
+
+	for(int i = 1; i <= list_size(lista); ++i){
+		jb = get_item_bypos(lista, i);
+		pid_wait = waitpid(jb -> pgid, &status, WUNTRACED|WNOHANG|WCONTINUED);
+		if(pid_wait == jb -> pgid){
+			status_res = analyze_status(status, &info);
+			/*
+			qué puede ocurrir?
+			- EXITED
+			- SIGNALED
+			- SUSPENDED
+			- CONTINUED
+			*/
+
+			printf("[SIGCHLD] Wait realizado para trabajo en background: %s, pid = %i\n", jb -> command, pid_wait);
+
+			/*
+			Actuar según los posibles casos reportado por status
+			Al menos hay que considerar EXITED, SIGNALED y SUSPENDED
+			en este ejemplo sólo se consideran los dos primeros
+			*/
+
+			if((status_res == SIGNALED) || (status_res == EXITED)){
+				printf("Comando %s ejecutado en background con PID %d ha terminado su ejecucion\n\n", jb->command, jb->pgid);
+				delete_job(lista, jb);
+				i--; // OJO! El siguiente ha ocupado la posicion de este en la lista
+			}
+			if(status_res == CONTINUED){
+				printf("Comando %s ejecutado en background con PID %d ha continuado su ejecucion\n\n", jb->command, jb->pgid);
+				jb->state = CONTINUED;
+			}
+			if(status_res == SUSPENDED){
+				printf("Comando %s ejecutado en background con PID %d ha suspendido su ejecucion\n\n", jb->command, jb->pgid);
+				jb->state = STOPPED;
+			}
+
+		}
+	}
+	return;
+}
+
+
+
 int main(void)
 {
 	char inputBuffer[MAX_LINE]; /* buffer to hold the command entered */
@@ -34,10 +93,21 @@ int main(void)
 	enum status status_res; /* status processed by analyze_status() */
 	int info;				/* info processed by analyze_status() */
 
+	job *nuevo; // Para almacenar un nuevo job
+
+	//IGNORAR SEÑALES MOLESTAS
+	ignore_terminal_signals();
+
+	//Creo una lista vacía para jobs en bg y suspendidos
+	lista = new_list("unalista");
+
+	//Instalar manejador de sigchild
+	signal(SIGCHLD, my_sigchld);
+
 	while (1)   /* Program terminates normally inside get_command() after ^D is typed*/
 	{   
 		
-		ignore_terminal_signals(); //Ignora ^C y ^Z
+		//ignore_terminal_signals(); //Ignora ^C y ^Z
 
 		printf("COMMAND->");
 		fflush(stdout);
@@ -52,13 +122,18 @@ int main(void)
 			continue;
 		}
 
+		if(!strcmp(args[0], "salir")){
+			exit(0);
+			continue;
+		}
+
 		if(!strcmp(args[0], "cd")){
 			if(args[1] != NULL){
 				chdir(args[1]);
+			}else{
+				printf("El dinerctorio %s no existe.\n", args[1]);
 			}
 			continue;
-
-
 		}
 
 		/* the steps are:
@@ -81,17 +156,55 @@ int main(void)
 
 				printf("Proceso %d en bg\n", pid_fork);
 
+				//Insertar el proceso en bg en la lista
+				nuevo = new_job(pid_fork, inputBuffer, BACKGROUND); // Nuevo nodo job
+
+				block_SIGCHLD(); // Impide que entre SIGCHLD cuando cambio la lista en main()
+
+				add_job(lista, nuevo);
+				unblock_SIGCHLD();
+
+				print_job_list(lista); //DEBUG
+
 			}else{
 
+				printf("foreground\n");
+
 				set_terminal(pid_fork); // Cede el terminal al hijo en fg
+
+				/*
+				EL SHELL ESPERA A QUE:
+					- el hijo muera(exit / signal)
+					- el hijo se suspenda(stop)
+				ESPERAMOS DE FORMA BLOQUEANTE
+				(no usar WNOHANG)
+				*/
+				
 				waitpid(pid_fork, &status, WUNTRACED);
+
+				//El padre va a imprimir que pasó;
 				status_res = analyze_status(status, &info);
+
+				set_terminal(getpid()); //El padre recupera el terminal despues del wait
+
+				/*
+				¿Por qué puedo retornar del wait del job en fg?
+				EXITED ->
+				SIGNALED ->
+				STOPPED -> Insertar en la lista el proceso stopped
+				Insertar el proceso en bg en la lista
+				*/
 
 				if(status_res == EXITED){
 					printf("Proceso en bg murió voluntariamente\n");
 				}else if(status_res == SIGNALED){
 					printf("Proceso en bg lo mataron con una señal\n");
 				}else if(status_res == SUSPENDED){
+					nuevo = new_job(pid_fork, inputBuffer, STOPPED);
+					block_SIGCHLD();
+					add_job(lista, nuevo);
+					unblock_SIGCHLD();
+					print_job_list(lista);
 					printf("Proceso en bg se suspendió\n");
 				}
 
