@@ -1,3 +1,3 @@
 # Shell-Project
 
-Shell project with the basics function for the subject Operative Systems.
+Shell project with the basics function for the Operative Systems subject.
